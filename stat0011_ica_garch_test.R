@@ -38,7 +38,7 @@ lines(NK225, col = "blue")
 # Check for Autocorrelation ====================================================
 
 Box.test(SP500, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Significant
-plot.ac(SP500) # Cut-off at order 3
+plot.ac(SP500) # Cut-off at order 1
 
 Box.test(NK225, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
 plot.ac(NK225)

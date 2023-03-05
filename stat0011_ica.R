@@ -43,7 +43,7 @@ plot.ac(NK225)
 
 # TS Modelling =================================================================
 
-SP500.model <- garchFit(formula = ~arma(3,0) + garch(1,1), data = SP500, trace = FALSE, cond.dist = "norm")
+SP500.model <- garchFit(formula = ~arma(1,0) + garch(1,1), data = SP500, trace = FALSE, cond.dist = "norm")
 SP500.res <- residuals(SP500.model, standardize = TRUE)
 
 Box.test(SP500.res, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
