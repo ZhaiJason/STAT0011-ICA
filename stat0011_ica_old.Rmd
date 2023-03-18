@@ -1,0 +1,340 @@
+---
+title: "stat0019_ica"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
+# Packages required
+library(fGarch) # For garchFit and relevant distributions
+library(KScorrect) # For LcKS
+library(ADGofTest) # For ad.test
+library(VineCopula) # For copula selection and modelling
+```
+
+# Task 1
+
+# Task 2
+
+## Task 2a
+
+## Task 2b
+
+### 2b.1 Data Input
+
+Among the six indices provided, we selected **S&P500** and **Nikkei 225** considering the most appropriate choices to construct a portfolio. To simplify and make the naming more organised, we will name the two indices as "SP500" and "NK225", respectively.
+
+We have selected S&P500 and Nikkei 225 to construct our portfolio. The stock price data, due to availability, are downloaded from *DATA SOURCE TO BE SPECIFIED*.
+
+```{r 2b.1}
+# Read-in csv data of stock prices
+SP500.temp <- read.csv("SP500.csv", encoding = "UTF-8")
+SP500.price <- as.numeric(gsub(",", "", SP500.temp$Price))
+SP500.price <- rev(SP500.price) # Fix the order to be forward in time
+NK225.temp <- read.csv("NK225.csv", encoding = "UTF-8")
+NK225.price <- NK225.temp$Price
+NK225.price <- rev(NK225.price) # Fix the order to be forward in time
+
+# Calculate log-return
+# SP500 <- diff(log(SP500.price))
+# NK225 <- diff(log(NK225.price))
+SP500 <- log(tail(SP500.price, -1)) - log(head(SP500.price, -1))
+NK225 <- log(tail(NK225.price, -1)) - log(head(NK225.price, -1))
+
+# Remove temporary variables
+rm(SP500.temp, SP500.price, NK225.temp, NK225.price)
+```
+
+### 2b.2 Time Series Modelling
+
+Taking a look at the plots of the log-returns for the 2 indices, we can observe that log-returns evolve over time, with non-constant variances which comes in cluster. Therefore, models for the time-varying conditional mean and variance will be included.
+
+```{r 2b.2.1, fig.width = 10, fig.height = 4}
+par(mfrow = c(1, 2))
+plot(SP500, type = "l", main = "Figure 1. traceplot of SP500 log-return")
+plot(NK225, type = "l", main = "Figure 2. traceplot of NK225 log-return")
+par(mfrow = c(1, 1))
+```
+
+Firstly, we check for the existence of autocorrelation for the log-returns using the Ljung-Box test. The null hypothesis is that the first $m$ lags autocorrelation coefficients are jointly zero, and we reject $H_0$ for S&P500 index due to a small p-value and do not reject it for Nikkei 225 index due to a p-value of 0.7646. Therefore, we expect a serial correlation only for the log-returns of S&P500 but not for the latter, and similar conclusions can be made by looking at the plots of ACF and PACF. *这一段同时说一下autocorrelation和volatility cluster，code部分加上了squared test*
+
+```{r 2b.2.2 Box Tests, echo = TRUE}
+# Check for autocorrelation via Ljung-Box test
+Box.test(SP500, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Significant
+Box.test(NK225, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+
+# Check for volatility clustering via Ljung-Box test
+Box.test(SP500^2, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Significant
+Box.test(NK225^2, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Significant
+```
+
+The revealed autocorrelation and volatility clustering can also be seen from the bellowed ACF and PACF plots.
+
+```{r 2b.2.3, fig.width = 10, fig.height = 4}
+# Create function for generating ACF, PACF, and squared ACF plots
+plot.ac <- function(x, name) {
+    par(mfrow = c(1, 3))
+    acf(x, main = paste("ACF of", name))
+    pacf(x, main = paste("PACF of", name))
+    acf(x^2, main = paste("ACF of", expression(name^2)))
+    par(mfrow = c(1, 1))
+}
+
+plot.ac(SP500, "SP500 log-return") # AR(1) + GARCH
+plot.ac(NK225, "NK225 log-return") # only GARCH
+```
+
+For S&P500, we can observe that:
+
+1. The ACF plot has values which are almost all within the 95% confidence interval and statistically close to zero;
+2. The PACF cuts off to zero after the first lag, and lags 3, 7, 15, 29 are all significant;
+3. The ACF of squared returns witness a quick geometrical decay and there are some significant lags which might indicate a need for a GARCH model.*这里也许可以reference一下box test的结果*
+
+As for Nikkei 225, similar ACF plots are presented, and only lag 24 is significant in the PACF plot, supporting the previous conclusion that the log-return of Nikkei 225 index does not have obvious autocorrelation. *这一段重新写一下，NK225没有reveal autocorrelation但有volatility clustering，然后根据定义GARCH(1,1)足够address volatility的问题，所以我们单独用GARCH*
+
+Therefore, we only consider building AR-GARCH model for S&P500 to account for its serial correlation.*这一段也是*
+
+```{r 2b.2.4 Trying PIT}
+cond.dist <- c("norm", "snorm", "ged", "sged", "std", "sstd", "QMLE") # "snig" removed
+SP500.models <- NK225.models <- list()
+for (this.dist in cond.dist) {
+    # Model time series correlation
+    SP500.model.temp <- garchFit(formula = ~arma(1, 0) + garch(1, 1), data = SP500, trace = FALSE, cond.dist = this.dist)
+    NK225.model.temp <- garchFit(formula = ~garch(1, 1), data = NK225, trace = FALSE, cond.dist = this.dist)
+    
+    SP500.models[[this.dist]]$model <- SP500.model.temp
+    NK225.models[[this.dist]]$model <- NK225.model.temp
+    
+    # Extract model residuals
+    SP500.res.temp <- residuals(SP500.model.temp, standardize = TRUE)
+    NK225.res.temp <- residuals(NK225.model.temp, standardize = TRUE)
+    
+    SP500.models[[this.dist]]$res <- SP500.res.temp
+    NK225.models[[this.dist]]$res <- NK225.res.temp
+    
+    # Perform Ljung-Box test on residuals
+    SP500.box.temp <- Box.test(SP500.res.temp, lag = 10, type = c("Ljung-Box"), fitdf = 1)$p.value
+    SP500.box.temp <- c(SP500.box.temp, Box.test(SP500.res.temp^2, lag = 10, type = c("Ljung-Box"), fitdf = 1)$p.value)
+    NK225.box.temp <- Box.test(NK225.res.temp, lag = 10, type = c("Ljung-Box"), fitdf = 1)$p.value
+    NK225.box.temp <- c(NK225.box.temp, Box.test(NK225.res.temp^2, lag = 10, type = c("Ljung-Box"), fitdf = 1)$p.value)
+    
+    SP500.models[[this.dist]]$Box.test <- SP500.box.temp
+    NK225.models[[this.dist]]$Box.test <- NK225.box.temp
+    
+    # cat(this.dist, "complete\n")
+}
+rm(this.dist,
+   SP500.model.temp, SP500.res.temp, SP500.box.temp,
+   NK225.model.temp, NK225.res.temp, NK225.box.temp)
+
+# Perform PIT
+# norm
+SP500.models$norm$res.PIT <- pnorm(SP500.models$norm$res)
+NK225.models$norm$res.PIT <- pnorm(NK225.models$norm$res)
+# snorm
+SP500.models$snorm$res.PIT <- psnorm(SP500.models$snorm$res, xi = SP500.models$snorm$model@fit$coef["skew"])
+NK225.models$snorm$res.PIT <- psnorm(NK225.models$snorm$res, xi = NK225.models$snorm$model@fit$coef["skew"])
+# ged
+SP500.models$ged$res.PIT <- pged(SP500.models$ged$res, nu = SP500.models$ged$model@fit$coef["shape"])
+NK225.models$ged$res.PIT <- pged(NK225.models$ged$res, nu = NK225.models$ged$model@fit$coef["shape"])
+# sged
+SP500.models$sged$res.PIT <- psged(SP500.models$sged$res, nu = SP500.models$sged$model@fit$coef["shape"], xi = SP500.models$sged$model@fit$coef["skew"])
+NK225.models$sged$res.PIT <- psged(NK225.models$sged$res, nu = NK225.models$sged$model@fit$coef["shape"], xi = NK225.models$sged$model@fit$coef["skew"])
+# std
+SP500.models$std$res.PIT <- pstd(SP500.models$std$res, nu = SP500.models$std$model@fit$coef["shape"])
+NK225.models$std$res.PIT <- pstd(NK225.models$std$res, nu = NK225.models$std$model@fit$coef["shape"])
+# sstd (preferred)
+SP500.models$sstd$res.PIT <- psstd(SP500.models$sstd$res, nu = SP500.models$sstd$model@fit$coef["shape"], xi = SP500.models$sstd$model@fit$coef["skew"])
+NK225.models$sstd$res.PIT <- psstd(NK225.models$sstd$res, nu = NK225.models$sstd$model@fit$coef["shape"], xi = NK225.models$sstd$model@fit$coef["skew"])
+# QMLE (assume normal distribution)
+SP500.models$QMLE$res.PIT <- pnorm(SP500.models$QMLE$res)
+NK225.models$QMLE$res.PIT <- pnorm(NK225.models$QMLE$res)
+
+# Check uniformity of residuals after PIT
+for (this.dist in cond.dist) {
+    SP500.models[[this.dist]]$LcKS <- as.numeric(LcKS(eval(parse(text = paste0("SP500.models$", this.dist, "$res.PIT"))), cdf = "punif", nreps = 10000)$p.value)
+    SP500.models[[this.dist]]$ad.test <- as.numeric(ad.test(eval(parse(text = paste0("SP500.models$", this.dist, "$res.PIT"))), null = "punif")$p.value)
+    NK225.models[[this.dist]]$LcKS <- as.numeric(LcKS(eval(parse(text = paste0("NK225.models$", this.dist, "$res.PIT"))), cdf = "punif", nreps = 10000)$p.value)
+    NK225.models[[this.dist]]$ad.test <- as.numeric(ad.test(eval(parse(text = paste0("NK225.models$", this.dist, "$res.PIT"))), null = "punif")$p.value)
+    
+    # cat(this.dist, "check complete\n")
+}
+rm(this.dist)
+
+# Remove supplement elements of the models list
+for (this.dist in cond.dist) {
+    SP500.models[[this.dist]]$model <- SP500.models[[this.dist]]$res <- SP500.models[[this.dist]]$res.PIT <- NULL
+    NK225.models[[this.dist]]$model <- NK225.models[[this.dist]]$res <- NK225.models[[this.dist]]$res.PIT <- NULL
+}
+rm(this.dist)
+```
+
+```{r 2b.2.5 model fitting}
+# SP500 AR(1)-GARCH(1,1) model
+SP500.model <- garchFit(formula = ~arma(1, 0) + garch(1, 1), data = SP500, trace = FALSE, cond.dist = "sstd")
+SP500.res <- residuals(SP500.model, standardize = TRUE)
+SP500.coef <- SP500.model@fit$coef
+
+# NK225 GARCH(1,1) model
+NK225.model <- garchFit(formula = ~garch(1, 1), data = NK225, trace = FALSE, cond.dist = "sstd")
+NK225.res <- residuals(NK225.model, standardize = TRUE)
+NK225.coef <- NK225.model@fit$coef
+
+# Inspect model ICs
+SP500.model@fit$ics
+NK225.model@fit$ics
+```
+
+*这里需要提一下我们发现所有ICS都是reasonable low value，说明没有这方面的问题*
+
+To check the fitting of our model, we shall inspect if there is autocorrelation or volatility clustering left for the model residuals. This can be checked using Ljung-Box test and ACF-PACF plots, as shown below.
+
+```{r 2b.2.5 model checking, fig.width = 10, fig.height = 4}
+# Check SP500 modelling
+Box.test(SP500.res, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+Box.test(SP500.res^2, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+plot.ac(SP500.res, name = "SP500 Model Residual")
+
+# Check NK225 modelling
+Box.test(NK225.res, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+Box.test(NK225.res^2, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+plot.ac(NK225.res, name = "NK225 Model Residual")
+```
+
+From the results, we see *这里comment一下上面这些结果，证明我们的model没问题*
+
+### 2b.3 Constructing Copula
+
+*这里说一下我们得用跟上一部分modelling conditional distribution相同的distribution*
+
+```{r 2b.3.1 PIT, fig.width = 10, fig.height = 4}
+# Plot histograms for the residual distribution and fitted distribution
+par(mfrow = c(1, 2))
+
+x <- seq(-4, 4, 0.001)
+hist(SP500.res, breaks = 20, freq = FALSE, ylim = c(0, 0.5))
+lines(x, dsstd(x, nu = SP500.coef["shape"], xi = SP500.coef["skew"]), type = "l", col = "red")
+legend("topleft", lty = 1, col = "red", legend = "Fitted Distribution", cex = 0.75, bty = "n")
+hist(NK225.res, breaks = 20, freq = FALSE, ylim = c(0, 0.5))
+x <- seq(-4, 4, 0.001)
+lines(x, dsstd(x, nu = NK225.coef["shape"], xi = NK225.coef["skew"]), type = "l", col = "red")
+legend("topleft", lty = 1, col = "red", legend = "Fitted Distribution", cex = 0.75, bty = "n")
+rm(x)
+
+par(mfrow = c(1, 1))
+
+# Perform PIT
+SP500.u <- psstd(SP500.res, nu = SP500.coef["shape"], xi = SP500.coef["skew"])
+NK225.u <- psstd(NK225.res, nu = NK225.coef["shape"], xi = NK225.coef["skew"])
+
+# Plot histograms of PIT results
+par(mfrow = c(1, 2))
+hist(SP500.u, breaks = 20)
+hist(NK225.u, breaks = 20)
+par(mfrow = c(1, 1))
+
+# Checking PIT effectiveness
+LcKS(SP500.u, cdf = "punif")$p.value # 0.3356
+ad.test(SP500.u, null = "punif")$p.value # 0.02030539 Significant
+
+LcKS(NK225.u, cdf = "punif")$p.value # 0.0282 Significant
+ad.test(NK225.u, null = "punif")$p.value # 0.07513015
+```
+
+Some of the test results of uniformity after PIT is significant. However, this is the best result we may obtain after trying out supported distributions under the `garchFit` function. However, the resulted p-values are not extremely small. Also, considering the above histograms fit and plot of uniform distribution, we believe this approximation is acceptable. *我简单写了这一段，可能需要rephrase一下*
+
+We would now use the transformed data to find a suitable copula.
+
+```{r 2b.3.2 Fit Copula}
+# Determine copula
+model <- BiCopSelect(SP500.u, NK225.u, familyset = NA, selectioncrit = "AIC", indeptest = TRUE, level = 0.05)
+model # Bivariate copula: Survival BB1 (par = 0.11, par2 = 1.45, tau = 0.35) 
+
+# Simulate from copula
+n <- 2000
+sim.u <- BiCopSim(n, family = 17, par = model$par, par2 = model$par2) # Survival BB1 (BB1 90 degree rotate)
+
+# Plot observed and simulate copula
+plot(SP500.u, NK225.u, pch = 20, main = "Observed Copula")
+plot(sim.u[, 1], sim.u[, 2], pch = 20, main = "Simulated Copula")
+```
+
+
+
+```{r 2b.3.4 Inverse PIT, fig.width = 10, fig.height = 4}
+# Separate simulated results for SP500 and NK225
+SP500.sim <- qsstd(sim.u[, 1], nu = SP500.coef["shape"], xi = SP500.coef["skew"])
+NK225.sim <- qsstd(sim.u[, 2], nu = NK225.coef["shape"], xi = NK225.coef["skew"])
+```
+
+
+### 2b.4 Re-introducing Time Series Effects
+
+```{r 2b.4.1 Re-introduce AR-GARCH}
+# Re-introduce AR-GARCH for SP500
+mu <- SP500.coef["mu"]
+ar1 <- SP500.coef["ar1"]
+omega <- SP500.coef["omega"]
+alpha1 <- SP500.coef["alpha1"]
+beta1 <- SP500.coef["beta1"]
+sigma2s <- numeric(n)
+y <- numeric(n)
+sigma2s[1] <- 0
+y[1] <- mu + SP500.sim[1]
+
+for (i in 2:n) {
+    sigma2s[i] <- omega + alpha1 * sigma2s[i - 1] * SP500.sim[i - 1]^2 + beta1 * sigma2s[i - 1]
+    y[i] <- mu + ar1 * y[i - 1] + sqrt(sigma2s[i]) * SP500.sim[i]
+}
+
+SP500.out <- y # Store output
+rm(i, y, mu, ar1, omega, alpha1, beta1, sigma2s)
+
+# Re-introduce GARCH for NK225
+mu <- NK225.coef["mu"]
+# ar1 <- NK225.coef["ar1"]
+omega <- NK225.coef["omega"]
+alpha1 <- NK225.coef["alpha1"]
+beta1 <- NK225.coef["beta1"]
+sigma2s <- numeric(n)
+y <- numeric(n)
+sigma2s[1] <- 0
+y[1] <- mu + NK225.sim[1]
+
+for (i in 2:n) {
+    sigma2s[i] <- omega + alpha1 * sigma2s[i - 1] * NK225.sim[i - 1]^2 + beta1 * sigma2s[i - 1]
+    y[i] <- mu + sqrt(sigma2s[i]) * NK225.sim[i]
+}
+
+NK225.out <- y # Store output
+rm(i, y, mu, omega, alpha1, beta1, sigma2s)
+
+# Plot original log-return and simulated log-return distributions
+plot(SP500, NK225, pch = 20, col = rgb(0, 0, 0, 0.1), main = "Distribution of Log-returns")
+points(SP500.out, NK225.out, pch = 20, col = rgb(1, 0, 0, 0.1))
+legend("bottomright", pch = 20, col = rgb(c(0, 1), 0, 0, 0.5), legend = c("Original Data", "Simulated Data"), cex = 0.75, bty = "n")
+```
+
+*稍微介绍一下上面的code就好*
+
+
+### 2b.5 Compute Value-at-Risk
+
+```{r 2b.5 Calculate VaR}
+portsim <- matrix(0, nrow = n, ncol = 1)
+varsim <- matrix(0, nrow = 1, ncol = 2)
+
+portsim <- log(1 + ((exp(SP500.out) - 1) + (exp(NK225.out) - 1)) * (1 / 2))
+varsim <- quantile(portsim, c(0.01, 0.05))
+varsim
+```
+
+\newpage
+
+## Task 2c
+
+```{r 2c.1 JB test}
+fBasics::jarqueberaTest(SP500)
+fBasics::jarqueberaTest(NK225)
+```

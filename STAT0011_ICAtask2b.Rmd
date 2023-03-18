@@ -1,0 +1,274 @@
+---
+title: "STAT0011ICA_Q2b"
+author: "Xintong"
+date: "2023/3/5"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center")
+# Packages required
+library(fGarch)
+library(KScorrect)
+library(parallel) # For parallel computing setup
+```
+
+## Task 1
+
+\newpage
+
+## Task 2 (a)
+
+\newpage
+
+## Task2 (b)
+
+Among the six indices provided, we selected **S&P500** and **Nikkei 225** considering the most appropriate choices to construct a portfolio. To simplify and make the naming more organised, we will name the two indices as "SP500" and "NK225", respectively.
+
+### Data
+
+We have selected S&P500 and Nikkei 225 to construct our portfolio. The stock price data, due to availability, are downloaded from *DATA SOURCE TO BE SPECIFIED*.
+
+```{r read_data}
+# Read-in csv data of stock prices
+SP500.temp <- read.csv("SP500.csv", encoding = "UTF-8")
+SP500.price <- as.numeric(gsub(",", "", SP500.temp$Price))
+SP500.price <- rev(SP500.price) # Fixed the time order from 2000 to 2018
+NK225.temp <- read.csv("NK225.csv", encoding = "UTF-8")
+NK225.price <- NK225.temp$Price
+NK225.price <- rev(NK225.price) # Fixed the time order from 2000 to 2018
+
+# Calculate log-return
+SP500 <- log(tail(SP500.price, -1)) - log(head(SP500.price, -1))
+NK225 <- log(tail(NK225.price, -1)) - log(head(NK225.price, -1))
+
+# Remove temporary variables
+rm(SP500.temp, SP500.price, NK225.temp, NK225.price)
+```
+
+### Time Series Modelling
+
+Taking a look at the plots of the log-returns for the 2 indices, we can observe that log-returns evolve over time, with non-constant variances which comes in cluster. Therefore, models for the time-varying conditional mean and variance will be included.
+
+```{r plot_log_return_trace, fig.width = 10, fig.height = 4}
+par(mfrow = c(1, 2))
+plot(SP500, type = "l", main = "Figure 1. traceplot of SP500 log-return")
+plot(NK225, type = "l", main = "Figure 2. traceplot of NK225 log-return")
+par(mfrow = c(1, 1))
+```
+
+Firstly, we check for the existence of autocorrelation for the log-returns using the Ljung-Box test. The null hypothesis is that the first $m$ lags autocorrelation coefficients are jointly zero, and we reject $H_0$ for S&P500 index due to a small p-value and do not reject it for Nikkei 225 index due to a p-value of 0.7646. Therefore, we expect a serial correlation only for the log-returns of S&P500 but not for the latter, and similar conclusions can be made by looking at the plots of ACF and PACF.
+
+```{r check for autocorrelation, echo = TRUE}
+# Check for autocorrelation via Ljung-Box test
+Box.test(SP500, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Significant
+Box.test(NK225, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+```
+
+The code for plotting ACF and PACF are the following:
+
+```{r ACFplots, fig.width = 8, fig.height = 3}
+# Create function for generating ACF, PACF, and squared ACF plots
+plot.ac <- function(x, name) {
+    par(mfrow = c(1, 3))
+    acf(x, main = paste("ACF of", name))
+    pacf(x, main = paste("PACF of", name))
+    acf(x^2, main = paste("ACF of", expression(name^2)))
+    par(mfrow = c(1, 1))
+}
+
+plot.ac(SP500, "SP500 log-return") # Observed
+plot.ac(NK225, "NK225 log-return")
+```
+
+For S&P500, we can observe that:
+
+1. The ACF plot has values which are almost all within the 95% confidence interval and statistically close to zero;
+2. The PACF cuts off to zero after the first lag, and lags 3, 7, 15, 29 are all significant;
+3. The ACF of squared returns witness a quick geometrical decay and there are some significant lags which might indicate a need for a GARCH model.
+
+As for Nikkei 225, similar ACF plots are presented, and only lag 24 is significant in the PACF plot, supporting the previous conclusion that the log-return of Nikkei 225 index does not have obvious autocorrelation.
+
+Therefore, we only consider building AR-GARCH model for S&P500 to account for its serial correlation.
+
+#### Model Fitting
+
+From figure 3, we can determine the order of the AR model to be lag 1, i.e. AR(1). As for the model for conditional variance, we directly choose GARCH (1,1) as it is already sufficient for most of the cases in practice.
+
+The final AR(1)-GARCH(1,1) model is done with the following code, together with the value of various information criterion:
+
+```{r model_ac}
+SP500.model <- fGarch::garchFit(formula = ~arma(1,0) + garch(1,1), data = SP500, trace = FALSE, cond.dist = "std")
+
+# Define a supplement variable for easier data extraction
+SP500.coef <- SP500.model@fit$coef
+
+# Inspect model IC measures
+SP500.model@fit$ics
+```
+
+#### Model Checking
+
+To check whether the model is adequate, we extract the residuals and check if the residuals have autocorrelation using the Ljung-Box test. It turns out that both the p-values for residuals and squared residuals are larger than 0.05, indicating that they are independent, and therefore both the AR model and GARCH model are well chosen. This is also consistent with the performance of the plots, with almost all the ACFs and PACFs within the 95% confidence interval, as shown in figure below.
+
+```{r check_residual_ac, fig.width = 8, fig.height = 3}
+SP500.res <- fGarch::residuals(SP500.model, standardize = TRUE)
+Box.test(SP500.res, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+Box.test(SP500.res^2, lag = 10, type = c("Ljung-Box"), fitdf = 1) # Passed
+plot.ac(SP500.res, "residuals of fitted model for SP500")
+```
+
+### Copula Theory
+
+Now we consider fitting copula models and doing the simulations.
+
+We firstly determine the marginal distributions as well as their parameters.Through the histogram of S&P500, we approximate the residuals to have a standardized t-distribution with mean 0 and variance 1, aiming to correspond well with the residuals of the time-series model stated previously. As for the Nikkei225, we estimate its parameter by finding its MLE. The figures below are the histogram and density lines for both data.这里下面可以说一下我们之所以选用std作为pit是因为jarquebera没有通过，说明数据并不是从normal来的。
+
+```{r fit_marginal_distributions, fig.width = 10, fig.height = 4}
+# Check if data from normal distribution
+fBasics::jarqueberaTest(SP500.res, description = "Test of Normality") # Significant
+fBasics::jarqueberaTest(NK225, description = NA) # Significant
+
+# Plot histograms and assumed distribution curves
+par(mfrow = c(1, 2))
+
+hist(SP500.res, breaks = 20, freq = FALSE, ylim = c(0, 0.5))
+x <- seq(-4, 4, 0.001)
+lines(x, fGarch::dstd(x, 0, 1, SP500.coef['shape']), type = "l", col = "red") # Parameters 0 and 1 to match the conditional distribution in garchFit
+legend("topleft", lty = 1, col = "red", legend = "Fitted Distribution", cex = 0.75, bty = "n")
+
+# Perform MLE estimate on std distribution prarmeters for fitting NK225
+NK225.params <- MASS::fitdistr(NK225, "t")$estimate
+
+hist(NK225, breaks = 20, freq = FALSE, ylim = c(0, 15))
+x <- seq(-0.4, 0.4, 0.001)
+lines(x, fGarch::dstd(x, NK225.params[1], NK225.params[2] * 1.2, NK225.params[3]), type = "l", col = "red") # Parameters manually adjusted (sd * 1.2) to enhance distribution fit
+legend("topleft", lty = 1, col = "red", legend = "Fitted Distribution", cex = 0.75, bty = "n")
+
+# Remove temporary variable
+rm(x)
+```
+
+The probability integral transformation are done and the large p-values from Anderson-Darling and Kolmogorov-Smirnov test show clearly that the two cumulative density functions follow uniform distribution, and therefore the distributions are of good fit.
+
+```{r PIT, fig.width = 10, fig.height = 4}
+# PIT
+SP500.u <- fGarch::pstd(SP500.res, 0, 1, SP500.coef["shape"])
+NK225.u <- fGarch::pstd(NK225, NK225.params[1], NK225.params[2]*1.2, NK225.params[3])
+
+par(mfrow = c(1, 2))
+hist(SP500.u, breaks = 20)
+hist(NK225.u, breaks = 20)
+par(mfrow = c(1, 1))
+
+KScorrect::LcKS(SP500.u, cdf = "punif")$p.value
+KScorrect::LcKS(NK225.u, cdf = "punif")$p.value
+ADGofTest::ad.test(SP500.u, null = "punif")$p.value
+ADGofTest::ad.test(NK225.u, null = "punif")$p.value
+```
+
+#### Constructing copula
+
+The following code helps fit the best copula based on AIC to be the t-distribution with parameters below:
+
+```{r construct_copula}
+# Construct Copula
+model <- VineCopula::BiCopSelect(SP500.u, NK225.u, familyset = NA, selectioncrit = "AIC", indeptest = TRUE, level = 0.05)
+model
+```
+
+1000 simulations are made using the code `BiCopSim`, and a plot of the simulated data is as below on the right, which turned out to be similar with the pattern of the original data on the left. 
+Relative symmetric tail dependence can be seen from the plots and thus we can further confirm that the student-t distribution copula can be an appropriate choice.
+
+```{r simulate_copula}
+n <- 2000
+sim.u <- VineCopula::BiCopSim(n, family = 2, model$par, model$par2)
+
+#
+# 2 ggplots with marginal distributions
+# (把original data的plot挪到了这里来做对比，顺便加了marginal, code直接用的学长的)
+# 评价：看上去真厉害，但稍微改改设计，现在配色有点阴间，然后我不太清楚该怎么弄并排……
+par(mfrow = c(1, 2))
+plot1 <- ggplot(data.frame(SP500.u, NK225.u), aes(SP500.u, NK225.u)) + geom_point() + theme_classic()
+plot2 <- ggplot(data.frame(sim.u[ ,1], sim.u[ ,2]), aes(sim.u[ ,1], sim.u[ ,2])) + geom_point() + theme_classic()
+ggExtra::ggMarginal(plot1, type = "histogram")
+ggExtra::ggMarginal(plot2, type = "histogram")
+par(mfrow = c(1, 1))
+```
+
+The inverse probability integral transformation is done to get the separate simulated marginal distributions. Simulated data represented by the blue dots can fit relative well with the original data represented by the black ones, as shown below, indicating an adequate simulation.
+
+```{r IPIT}
+SP500.sim <- qstd(sim.u[, 1], 0, 1, SP500.coef['shape'])
+NK225.sim <- qstd(sim.u[, 2], NK225.params[1], NK225.params[2]*1.2, NK225.params[3])
+```
+
+The final step before calculating the values of VaR is to re-introduce the autocorrelation and GARCH effects of S&P500 index into the simulation using copula model. A good overlap of real data and simulated data is also shown in the plot. （需要进一步解释一下过程吗，但感觉直接放code应该也可以吧）
+
+```{r introduce_ac_effects, fig.width = 8, fig.height = 5}
+# Introduce GARCH effect and autocorrelation
+mu <- SP500.coef["mu"]
+ar1 <- SP500.coef["ar1"]
+omega <- SP500.coef["omega"]
+alpha1 <- SP500.coef["alpha1"]
+beta1 <- SP500.coef["beta1"]
+sigma2s <- numeric(n)
+y <- numeric(n)
+sigma2s[1] <- 0
+y[1] <- mu + SP500.sim[1]
+
+for (i in 2:n) {
+    sigma2s[i] <- omega + alpha1 * sigma2s[i - 1] * SP500.sim[i - 1]^2 + beta1 * sigma2s[i - 1]
+    y[i] <- mu + ar1 * y[i - 1] + sqrt(sigma2s[i]) * SP500.sim[i]
+}
+
+# Rename and clear temporary variables
+SP500.res <- y
+NK225.res <- NK225.sim
+rm(y, mu, ar1, omega, alpha1, beta1, sigma2s)
+
+plot(SP500, NK225, pch = 20, col = rgb(0, 0, 0, 0.1), main = "Distribution of Log-returns")
+points(SP500.res, NK225.res, pch = 20, col = rgb(1, 0, 0, 0.1)) # 我这边没有显示出蓝色的点诶
+legend("bottomright", pch = 20, col = rgb(c(0, 1), 0, 0, 0.5), legend = c("Original Data", "Simulated Data"), cex = 0.75, bty = "n")
+```
+
+#### Computing VaR
+
+We now calculate the 99% and 95% VaR of the portfolio on the weekly basis.
+
+```{r Computing VaR}
+portsim <- matrix(0, nrow = n, ncol = 1)
+varsim <- matrix(0, nrow = 1, ncol = 2)
+
+portsim <- log(1 + ((exp(SP500.sim) - 1) + (exp(NK225.sim) - 1)) * (1 / 2))
+varsim <- quantile(portsim, c(0.01, 0.05))
+varsim
+```
+
+### Strength of Monte Carlo Simulation approach
+
+**1. Flexibility:** Monte Carlo simulation can deal with non-linear cases where the linear correlation coefficient cannot provide accurate measure, and allow for the joint distribution other than normal distribution. For example, in this context, it can simulate the data well using the student-t copula model.
+<!-- # 我不确定我有没有理解正确notes里面对于non-linear的那个部分 -->
+<!-- 这个我也不是很确定，可以forum上问一下？ -->
+
+**2. Accurate estimation and easier to measure uncertainty:** Monte Carlo simulation is able to provide a more accurate estimation and confidence interval of VaR, as it considers the entire distribution of returns instead of merely the mean and standard deviation of the returns.
+
+**3. Possibility of forecasting:** Monte Carlo simulation allows for the generation of a large number of possible scenarios for future returns, which can be used to forecast the potential outcomes of a portfolio.
+
+**4. Incorporation of Correlations:** Monte Carlo simulation takes into consideration of correlations between variables, which can provide a more accurate estimation of VaR in a portfolio of assets.
+<!-- # 第四个这个我不确定需不需要，或者和第二条合在一起？ -->
+<!-- 我不太确定，因为multiple asset的情况，你看第四周内容提供了一个matrix calculation，那个应该address了parameteric setup的情况下有correlation的情况吧。 -->
+
+### Weakness of Monte Carlo Simulation approach
+
+**1. Time-consuming:** Monte Carlo simulation approach can be computationally intensive and time-consuming, especially for portfolios with many assets or complex models. As in our simulation, a large amount of parameters and matrices are produced and simulated, together with multiple models and simulations that might cause dimensionality problems.
+
+<!-- （但是好像用咱们的答案还不够有说服力，毕竟咱们的model也不是很复杂，也没有很high-dimension，但他的答案又要求写under this context -->
+<!-- 这个没啥问题，因为相对于parameteric确实更费时间，而且计算效率低就是MC方法的一个特性 -->
+
+**2. High dependence on inputs:** The accuracy of Monte Carlo simulation depends on the quality and accuracy of the input data used to generate the simulations. In our task, *a wrongly chosen combination of the six indices available might end up with a bad fit of the model and simulations*. In addition, it might also have difficulty in modelling extreme events if the historical data used to do the simulations do not contain relevant information.
+
+<!-- # 但是not affect much by the outliers and extreme values也可以算是advantage，所以这一点写在哪一边 -->
+<!-- 我标斜体的这部分我觉得有点怪，就算你随便选两个出来，只要你步骤对，最后的copula和simulation以及VaR计算都应该是准确的吧。这个是你学长在他们那写的吗？ -->

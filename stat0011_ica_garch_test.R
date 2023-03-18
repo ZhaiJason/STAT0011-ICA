@@ -26,8 +26,8 @@ NK225.price <- NK225.temp$Price
 NK225.price <- rev(NK225.price)
 
 # Log return
-SP500 <- na.omit(log(tail(SP500.price, -1)) - log(head(SP500.price, -1)))
-NK225 <- na.omit(log(tail(NK225.price, -1)) - log(head(NK225.price, -1)))
+SP500 <- log(tail(SP500.price, -1)) - log(head(SP500.price, -1))
+NK225 <- log(tail(NK225.price, -1)) - log(head(NK225.price, -1))
 
 rm(SP500.temp, SP500.price, NK225.temp, NK225.price)
 
@@ -59,13 +59,15 @@ SP500.model@fit$ics
 fBasics::jarqueberaTest(SP500)
 fBasics::jarqueberaTest(NK225)
 
-# MLE estimate, suggest using bbmle package
-SP500.params <- MASS::fitdistr(SP500.res, "t")$estimate
-NK225.params <- MASS::fitdistr(NK225, "t")$estimate
+
 
 hist(SP500.res, breaks = 20, freq = FALSE)
 x <- seq(-4, 4, 0.001)
 lines(x, dstd(x, SP500.params[1], SP500.params[2]*1.2, SP500.params[3]), type = "l")
+
+
+# MLE estimate, suggest using bbmle package
+NK225.params <- MASS::fitdistr(NK225, "t")$estimate
 
 hist(NK225, breaks = 20, freq = FALSE)
 x <- seq(-0.4, 0.4, 0.001)
@@ -107,8 +109,6 @@ SP500.coef <- SP500.model@fit$coef
 # Introduce GARCH
 mu <- SP500.coef["mu"]
 ar1 <- SP500.coef["ar1"]
-ar2 <- SP500.coef["ar2"]
-ar3 <- SP500.coef["ar3"]
 omega <- SP500.coef["omega"]
 alpha1 <- SP500.coef["alpha1"]
 beta1 <- SP500.coef["beta1"]
@@ -124,8 +124,9 @@ for (i in 2:n) {
 
 plot(y, type = "l")
 
-
+# par(mfrow = c(1, 2))
 plot(SP500, NK225, xlim = c(-0.5, 0.5), ylim = c(-0.3, 0.3))
+# plot(y, NK225.sim, xlim = c(-0.5, 0.5), ylim = c(-0.3, 0.3))
 points(y, NK225.sim, col = "blue")
 
 # Compute VaR ==================================================================
